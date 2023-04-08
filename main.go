@@ -1,103 +1,79 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
-	"os"
-	"os/signal"
+	"time"
 
-	"github.com/Shopify/sarama"
+	"github.com/segmentio/kafka-go"
+	"github.com/segmentio/kafka-go/protocol"
 )
 
 func main() {
 
-	// Configuração do Producer
-	config := sarama.NewConfig()
-	config.Producer.Return.Successes = true
+	forever := make(chan bool)
 
-	// Criação do Producer
-	producer, err := sarama.NewAsyncProducer([]string{"localhost:9094"}, config)
-	if err != nil {
-		log.Fatalln("Erro ao criar o Producer:", err)
+	// PRODUCER:
+
+	writer := &kafka.Writer{
+		Addr:  kafka.TCP("localhost:9094"),
+		Topic: "myTopic",
 	}
 
-	defer producer.Close()
-
-	// Criação das mensagens
 	go func() {
 		for i := 0; i <= 10; i++ {
-			message := fmt.Sprintf("- Mensagem %d", i)
-			producer.Input() <- &sarama.ProducerMessage{
-				Topic: "myTopic",
-				Value: sarama.StringEncoder(message),
+
+			message := fmt.Sprintf("mensagem-%d", i)
+
+			err := writer.WriteMessages(context.Background(), kafka.Message{
+				Value: []byte(message),
+				Headers: []protocol.Header{
+					{
+						Key:   "session",
+						Value: []byte("1234"),
+					},
+				},
+				Key: []byte("key1"),
+			})
+
+			if err != nil {
+				log.Fatal("cannot write a message: ", err)
 			}
 
-			fmt.Printf("Mensagem %s enviada com sucesso\n", message)
+			time.Sleep(2 * time.Second)
 		}
-
 	}()
 
-	consumer()
+	// Consumindo
+	go consumer("myTopic", "consumer1")
+
+	<-forever
 }
 
-func consumer() {
-	config := sarama.NewConfig()
-	config.Consumer.Return.Errors = true
+// CONSUMER
 
-	// Adicione aqui as configurações do seu servidor Kafka
-	brokers := []string{"localhost:9094"}
-	topic := "myTopic"
+func consumer(topic string, consumerId string) {
 
-	// Crie um consumidor Kafka
-	consumer, err := sarama.NewConsumer(brokers, config)
-	if err != nil {
-		log.Fatalln("Erro ao criar consumidor Kafka:", err)
-	}
-	defer func() {
-		if err := consumer.Close(); err != nil {
-			log.Fatalln("Erro ao fechar consumidor Kafka:", err)
-		}
-	}()
+	fmt.Println("Consumindo topic : [", topic, "]")
 
-	// Configure um canal de sinais para capturar as interrupções do usuário
-	signals := make(chan os.Signal, 1)
-	signal.Notify(signals, os.Interrupt)
+	reader := kafka.NewReader(kafka.ReaderConfig{
+		Brokers:  []string{"localhost:9094"},
+		GroupID:  consumerId,
+		Topic:    topic,
+		MinBytes: 0,
+		MaxBytes: 10e6, //10MB
+	})
 
-	// Crie um canal para receber mensagens do Kafka
-	messages := make(chan *sarama.ConsumerMessage, 256)
+	defer reader.Close()
 
-	// Inicie a leitura da fila do Kafka
-	partitions, err := consumer.Partitions(topic)
-	if err != nil {
-		log.Fatalln("Erro ao obter partições do Kafka:", err)
-	}
-
-	for _, partition := range partitions {
-		partitionConsumer, err := consumer.ConsumePartition(topic, partition, sarama.OffsetOldest)
-		if err != nil {
-			log.Fatalln("Erro ao criar consumidor de partição Kafka:", err)
-		}
-		defer func() {
-			if err := partitionConsumer.Close(); err != nil {
-				log.Fatalln("Erro ao fechar consumidor de partição Kafka:", err)
-			}
-		}()
-
-		go func() {
-			for message := range partitionConsumer.Messages() {
-				messages <- message
-			}
-		}()
-	}
-
-	// Aguarde mensagens do Kafka e imprima seu conteúdo
 	for {
-		select {
-		case message := <-messages:
-			fmt.Printf("Mensagem recebida: %s\n", string(message.Value))
-		case <-signals:
-			fmt.Println("Interrompendo leitura da fila do Kafka...")
-			return
+		message, err := reader.ReadMessage(context.Background())
+		if err != nil {
+			log.Fatal("cannot receive a message: ", err)
+			break
 		}
+
+		fmt.Println("message received: ", string(message.Value), "[ Key: ", string(message.Key), "]")
 	}
 }
